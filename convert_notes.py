@@ -5,7 +5,9 @@ import os
 import re
 import sys
 from datetime import datetime
+import pytz
 from subprocess import call
+from pathvalidate import sanitize_filename
 
 
 
@@ -13,18 +15,32 @@ from subprocess import call
 INPUT_FILE = "./notes.json"
 
 # Path to the directory where we'll save the converted notes:
-OUTPUT_DIRECTORY = "./notes_converted/"
+OUTPUT_DIRECTORY = "./Simplenote_converted/"
 
 # Should the creation time of the created files be set to the creation
 # time of the original notes?
 # Will fail if you're not on a Mac, or don't have Xcode installed -
 # in which case set this to False.
-KEEP_ORIGINAL_CREATION_TIME = True
+KEEP_ORIGINAL_CREATION_TIME = False
 
 # Should the last-modified time of the created files be set to the
 # last-modified time of the original notes?
 KEEP_ORIGINAL_MODIFIED_TIME = True
 
+KEEP_METAINFO_INTO_YAML = True
+
+# Should convert dates to local timezone?
+CONVERT_TO_LOCAL_TIMEZONE = True
+
+def convert_to_local_time(utc_time_str):
+    """Convert UTC time string to local timezone ISO format."""
+    if not CONVERT_TO_LOCAL_TIMEZONE:
+        return utc_time_str
+        
+    utc_time = datetime.strptime(utc_time_str, "%Y-%m-%dT%H:%M:%S.%fZ")
+    utc_time = utc_time.replace(tzinfo=pytz.UTC)
+    local_time = utc_time.astimezone()
+    return local_time.isoformat()
 
 def main():
 
@@ -37,10 +53,10 @@ def main():
     if not os.path.isfile(INPUT_FILE):
         sys.exit(f"{INPUT_FILE} is not a file")
 
-    tag_position = input("\nWhere should tags be put? Either 'start' or 'end' (default is 'end'):")
+    tag_position = input("\nWhere should tags be put? Either 'start' or 'end' (default is 'start'):")
 
     if tag_position == "":
-        tag_position = "end"
+        tag_position = "start"
 
     if tag_position not in ["start", "end"]:
         sys.exit("Enter either 'start' or 'end'.")
@@ -79,57 +95,84 @@ def main():
                 # We'll skip any empty notes
                 print(f"Skipping empty note with ID of {note['id']}")
             else:
+                # 保存原始内容用于文件名
+                original_content = note["content"].splitlines()
+                filename_start = original_content[0] if original_content else ""
+                
+                # 处理内容行
+                content_lines = note["content"].splitlines()
+                
+                # 准备YAML front matter
+                yaml_front_matter = []
+                if KEEP_METAINFO_INTO_YAML:
+                    creation_date = convert_to_local_time(note['creationDate'])
+                    modified_date = convert_to_local_time(note['lastModified'])
+                    
+                    yaml_front_matter = [
+                        "---",
+                        f"Simplenote_id: {note['id']}",
+                        f"Simplenote_creationDate: {creation_date}",
+                        f"Simplenote_lastModified: {modified_date}",
+                        "---",
+                        ""
+                    ]
+                    
+                    # 将YAML添加到内容前面
+                    content_lines = yaml_front_matter + content_lines
+
+                # 处理标签
                 if "tags" in note:
-                    # Deal with the tags
-
                     tags = note["tags"]
-
-                    # Replace any non-word characters in each tag with a hyphen:
-                    tags = [re.sub(r'\W+', '-', tag) for tag in tags]
-
-                    # Prefix tags with # so obsidian recognises them as tags:
+                    tags = [re.sub(r'\W+', '_', tag) for tag in tags]
                     tags = ["#"+tag for tag in tags]
-
-                    # Create the tag text we'll insert into the new note:
                     tag_text = " ".join(tags)
 
                     if tag_position == "start":
-                        lines.insert(1, "")
-                        lines.insert(2, tag_text)
+                        if KEEP_METAINFO_INTO_YAML:
+                            # 在YAML之后插入标签
+                            insert_pos = len(yaml_front_matter)
+                            content_lines.insert(insert_pos, "")
+                            content_lines.insert(insert_pos + 1, tag_text)
+                        else:
+                            content_lines.insert(1, "")
+                            content_lines.insert(2, tag_text)
                     else:
-                        lines.append("")
-                        lines.append(tag_text)
+                        content_lines.append("")
+                        content_lines.append(tag_text)
 
-                # Create the new filename/path based on the first line of the note:
-                # But trim it to 248 characters so we can keep the entire thing -
-                # with the possible extra digit(s) added below - under 255 characters.
-                filename_start = lines[0]
-                if len(filename_start) > 248:
-                    filename = filename_start[0:248] + ".md"
+                # 使用原始内容的第一行创建文件名
+                if len(filename_start) > 100:
+                    base_filename = filename_start[0:100]
                 else:
-                    filename = filename_start + ".md"
+                    base_filename = filename_start
 
-                # Need to remove any forward slashes or colons:
-                filename = filename.replace("/", "").replace(":", "")
+                # 使用pathvalidate库规范化文件名，指定替换字符为下划线
+                filename = sanitize_filename(
+                    base_filename, 
+                    platform="auto",
+                    replacement_text="_"  # 使用下划线替换所有非法字符
+                ) + ".md"
+
                 filepath = os.path.join(OUTPUT_DIRECTORY, filename)
 
-                # Keep track of this filename and how many times it's been used:
+                # 处理文件名重复
                 if filename in filenames:
                     filenames[filename] += 1
                 else:
                     filenames[filename] = 1
 
                 if os.path.exists(filepath):
-                    # Don't want to overwrite it!
-                    # So, remove .md, and add the count of how many times this filename
-                    # has been used to the end, to make it unique.
-                    filename = f"{filename[:-3]} {filenames[filename]}.md"
+                    sanitized_base = sanitize_filename(
+                        f"{filename[:-3]} {filenames[filename]}", 
+                        platform="auto",
+                        replacement_text="_"  # 保持一致的替换字符
+                    )
+                    filename = f"{sanitized_base}.md"
                     filepath = os.path.join(OUTPUT_DIRECTORY, filename)
 
-                #print(f"Writing {note['id']} to '{filepath}'")
-
+                # 写入文件
                 with open(filepath, "w", encoding="UTF-8") as outfile:
-                    outfile.write("\n".join(lines))
+                    outfile.write("\n".join(content_lines))
 
                 if KEEP_ORIGINAL_CREATION_TIME:
                     creation_time = datetime.strptime(
