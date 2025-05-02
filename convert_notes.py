@@ -8,6 +8,9 @@ from datetime import datetime
 import pytz
 from subprocess import call
 from pathvalidate import sanitize_filename
+import win32file
+import win32con
+import pywintypes
 
 
 
@@ -19,9 +22,7 @@ OUTPUT_DIRECTORY = "./Simplenote_converted/"
 
 # Should the creation time of the created files be set to the creation
 # time of the original notes?
-# Will fail if you're not on a Mac, or don't have Xcode installed -
-# in which case set this to False.
-KEEP_ORIGINAL_CREATION_TIME = False
+KEEP_ORIGINAL_CREATION_TIME = True
 
 # Should the last-modified time of the created files be set to the
 # last-modified time of the original notes?
@@ -175,10 +176,36 @@ def main():
                     outfile.write("\n".join(content_lines))
 
                 if KEEP_ORIGINAL_CREATION_TIME:
-                    creation_time = datetime.strptime(
-                        note["creationDate"], "%Y-%m-%dT%H:%M:%S.%fZ"
-                    ).strftime("%m/%d/%Y %H:%M:%S %p")
-                    call(["SetFile", "-d", creation_time, filepath])
+                    try:
+                        # 将UTC时间转换为Windows文件时间格式
+                        creation_time = datetime.strptime(
+                            note["creationDate"], "%Y-%m-%dT%H:%M:%S.%fZ"
+                        )
+                        win_time = pywintypes.Time(creation_time)
+                        
+                        # 打开文件句柄
+                        handle = win32file.CreateFile(
+                            filepath,
+                            win32con.GENERIC_WRITE,
+                            0,
+                            None,
+                            win32con.OPEN_EXISTING,
+                            win32con.FILE_ATTRIBUTE_NORMAL,
+                            None
+                        )
+                        
+                        # 设置文件时间
+                        win32file.SetFileTime(
+                            handle,
+                            win_time,  # 创建时间
+                            None,      # 访问时间（保持不变）
+                            None       # 修改时间（保持不变）
+                        )
+                        
+                        # 关闭文件句柄
+                        handle.Close()
+                    except Exception as e:
+                        print(f"Warning: Could not set creation time for {filepath}: {e}")
 
                 if KEEP_ORIGINAL_MODIFIED_TIME:
                     # Set the file access and modified times:
